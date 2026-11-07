@@ -169,7 +169,7 @@ function ensureCard(w) {
 function ensureShard(id) {
   let e = shardEls.get(id);
   if (e) return e;
-  e = el("div", "shard", `<b>${id}</b><small></small>`);
+  e = el("div", "shard", `<b></b><small>shard #${id}</small>`);
   e.dataset.shard = id;
   e.onclick = (ev) => {
     ev.stopPropagation();
@@ -226,7 +226,7 @@ function renderBoard(s) {
   for (const sh of s.shards || []) {
     const e = ensureShard(sh.id);
     paintShard(e, sh.load);
-    e.querySelector("small").textContent = `${Math.round(sh.load)} rps`;
+    e.querySelector("b").innerHTML = `${Math.round(sh.load)}<i>rps</i>`;
     e.classList.toggle("hot", sh.target > sh.base);
     e.title = `Shard ${sh.id}: target ${sh.target} RPS, reported ${sh.load} RPS`;
 

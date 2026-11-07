@@ -222,8 +222,9 @@ main {
   transition: width .6s, height .6s, background .6s, box-shadow .3s;
   user-select: none;
 }
-.shard b { font-size: 18px; line-height: 1.1; }
-.shard small { font-size: 12px; opacity: .9; }
+.shard b { font-size: 20px; line-height: 1.1; white-space: nowrap; }
+.shard b i { font-style: normal; font-size: 11px; font-weight: 600; margin-left: 2px; opacity: .85; }
+.shard small { font-size: 11px; opacity: .85; white-space: nowrap; }
 .shard:hover { box-shadow: 0 0 0 3px #fff6; }
 .shard.hot { animation: hot 1.2s ease-in-out infinite; }
 .shard.hot::after {
