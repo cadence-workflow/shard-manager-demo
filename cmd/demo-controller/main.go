@@ -21,7 +21,7 @@ func main() {
 	flag.StringVar(&cfg.EtcdBin, "etcd-bin", "etcd", "etcd binary to run; empty to use an already running etcd")
 	flag.StringVar(&cfg.EtcdAddr, "etcd", "127.0.0.1:2379", "etcd client address")
 	flag.StringVar(&cfg.RunDir, "run-dir", ".run", "logs, PIDs and generated config")
-	flag.IntVar(&cfg.Workers, "workers", 4, "workers after start and reset")
+	flag.IntVar(&cfg.Workers, "workers", 3, "workers after start and reset")
 	flag.DurationVar(&cfg.IdleReset, "idle-reset", 90*time.Second, "reset after this long without visitor actions")
 	flag.Parse()
 

@@ -28,8 +28,8 @@ const (
 )
 
 // baseline is deliberately skewed: four heavy shards and a long tail. Placing
-// 4 shards per worker by count leaves the busiest worker at >=1.3x the average
-// in ~90% of placements, while a load-aware placement can reach ~1.02x.
+// shards across 3 workers by count leaves the busiest worker at >=1.3x the
+// average in ~80% of placements, while a load-aware placement can reach ~1.01x.
 // Sum is 1000 RPS (~2 cores).
 var baseline = [ShardCount]float64{240, 30, 25, 200, 20, 20, 170, 15, 15, 10, 140, 10, 10, 45, 10, 40}
 

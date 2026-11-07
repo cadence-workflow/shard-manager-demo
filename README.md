@@ -55,13 +55,13 @@ demo-controller            web UI, process lifecycle, workload demand table
 | Heat up a shard | Raises that shard's target RPS 5x (min 200, max 360). The owner burns more CPU and reports more load. |
 | Kill a worker | `SIGKILL`, with no draining. Shard Manager notices after the 2s heartbeat TTL and reassigns the shards. |
 | Add a worker | Starts a new process. Shard Manager gives it a share of shards, and load balancing tunes it further. |
-| Reset | Drains all workers, waits until Shard Manager forgets them, then starts 4 fresh ones with balancing OFF. |
+| Reset | Drains all workers, waits until Shard Manager forgets them, then starts 3 fresh ones with balancing OFF. |
 
 After 90s without any visitor action, the playground resets by itself (`-idle-reset`).
 
 ## Booth script (30-60 seconds)
 
-1. "These are 4 real processes running 16 shards. Load balancing is off, so look at the imbalance:
+1. "These are 3 real processes running 16 shards. Load balancing is off, so look at the imbalance:
    one worker does 1.5-2x the average work. You can see it in the CPU column too."
 2. Visitor clicks **Load balancing ON**. Within a few seconds Shard Manager moves 2-4 shards and
    the meter goes green.
