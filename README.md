@@ -3,11 +3,27 @@
 **Break the balance. Watch it recover.**
 
 A small interactive demo of the real [Shard Manager](https://github.com/cadence-workflow/shard-manager).
-Four real worker processes own 16 shards and burn real CPU for them. Visitors heat up shards,
+Three real worker processes own 16 shards and burn real CPU for them. Visitors heat up shards,
 kill workers, and add workers. The real Shard Manager decides where every shard goes.
 
 Nothing is simulated: the UI only shows what Shard Manager reports, and the CPU numbers come
 from the OS.
+
+**Load balancing OFF.** Shards are placed only by count, so Worker 3 does 1.6× the average work:
+
+![Load balancing OFF](docs/1-balancing-off.png)
+
+**Load balancing ON.** A few seconds later Shard Manager moves one hot shard, and the load is even (1.03×):
+
+![Load balancing ON](docs/2-balancing-on.png)
+
+**Kill a worker.** Shard Manager notices the missing heartbeat and moves its shards to the survivors:
+
+![Recovery after killing a worker](docs/3-recovery.png)
+
+**Press `?`** for a short guide to the screen:
+
+![Help guide](docs/4-help.png)
 
 ## Run it
 
