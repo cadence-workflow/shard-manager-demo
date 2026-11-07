@@ -63,7 +63,59 @@
     <button class="action reset" id="reset">Reset</button>
     <span class="mode-hint" id="mode-hint"></span>
     <span class="idle" id="idle"></span>
+    <button class="help-open" id="help-open" title="What am I looking at? (press ?)">?</button>
   </footer>
+
+  <div class="help hidden" id="help">
+    <div class="help-card" role="dialog" aria-labelledby="help-title">
+      <button class="help-close" id="help-close" aria-label="Close">×</button>
+      <h2 id="help-title">What am I looking at?</h2>
+      <p class="help-lead">A real Shard Manager with real worker processes on this laptop. The work is 16 shards that burn real CPU.</p>
+
+      <div class="help-grid">
+        <section>
+          <div class="help-sample">
+            <div class="sample-worker" style="--c: #58a6ff"><b>Worker 1</b><small>demo-worker-1</small></div>
+          </div>
+          <h3>Card = worker process</h3>
+          <p>Each card is a separate OS process. The color only tells workers apart. You can find them in <code>top</code>.</p>
+        </section>
+
+        <section>
+          <div class="help-sample">
+            <div class="shard" data-rps="10"><b>9</b><small>10 rps</small></div>
+            <div class="shard" data-rps="45"><b>13</b><small>45 rps</small></div>
+            <div class="shard hot" data-rps="360"><b>3</b><small>360 rps</small></div>
+          </div>
+          <h3>Square = shard</h3>
+          <p>A piece of work. Bigger and redder means more requests/sec. <span class="badge">HOT</span> means a visitor heated it.</p>
+        </section>
+
+        <section>
+          <div class="help-sample">
+            <div class="sample-bar"><div class="loadbar"><i style="width: 80%; --c: #3fb950"></i><b style="left: 55%"></b></div></div>
+          </div>
+          <h3>Bar = reported load</h3>
+          <p>The load the worker reports to Shard Manager. The white mark is the average of all workers. Balanced means all bars end near the mark.</p>
+        </section>
+
+        <section>
+          <div class="help-sample"><span class="sample-meter bad">1.80×</span><span class="sample-arrow">→</span><span class="sample-meter good">1.05×</span></div>
+          <h3>Imbalance = busiest / average</h3>
+          <p>1.00× is perfect. With load balancing OFF, Shard Manager places shards only by count, so this stays red.</p>
+        </section>
+      </div>
+
+      <h3 class="help-actions-title">Try it</h3>
+      <ul class="help-actions">
+        <li><span class="key toggle-key">ON</span><div><b>Load balancing</b> Shard Manager starts moving shards by their load. Watch the meter turn green.</div></li>
+        <li><span class="key">🔥</span><div><b>Heat up a shard</b> Makes one shard 5× hotter. Shard Manager moves other shards away from its worker.</div></li>
+        <li><span class="key">💀</span><div><b>Kill a worker</b> <code>SIGKILL</code>, no goodbye. About 2s later its shards come back on the survivors.</div></li>
+        <li><span class="key">➕</span><div><b>Add a worker</b> Starts a new process, and Shard Manager gives it a share of the shards.</div></li>
+      </ul>
+      <p class="help-foot">On the right: every shard move with its reason, CPU measured by the OS (not by Shard Manager), and the event log. Press <kbd>?</kbd> or <kbd>Esc</kbd> to close.</p>
+    </div>
+  </div>
 
   <div class="overlay hidden" id="overlay"><div id="overlay-text">Resetting…</div></div>
   <div class="toast hidden" id="toast"></div>

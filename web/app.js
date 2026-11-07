@@ -56,6 +56,17 @@ $("add").onclick = () => post("/api/add");
 $("reset").onclick = () => { setMode(null); post("/api/reset"); };
 $("balancing").onclick = () => post("/api/balancing", { on: $("balancing").getAttribute("aria-pressed") !== "true" });
 
+// ---- help ----
+
+const toggleHelp = (show = $("help").classList.contains("hidden")) => $("help").classList.toggle("hidden", !show);
+$("help-open").onclick = () => toggleHelp(true);
+$("help-close").onclick = () => toggleHelp(false);
+$("help").onclick = (e) => { if (e.target === $("help")) toggleHelp(false); };
+document.addEventListener("keydown", (e) => {
+  if (e.key === "?") toggleHelp();
+  else if (e.key === "Escape") { toggleHelp(false); setMode(null); }
+});
+
 // ---- helpers ----
 
 function heatColor(load) {
@@ -67,6 +78,11 @@ function heatColor(load) {
 }
 
 const shardSize = (load) => 54 + 62 * Math.min(1, Math.sqrt(Math.max(0, load) / MAX_SHARD_RPS));
+
+function paintShard(e, load) {
+  e.style.setProperty("--size", `${shardSize(load)}px`);
+  e.style.setProperty("--heat", heatColor(load));
+}
 
 function timeOf(ms) {
   return new Date(ms).toLocaleTimeString([], { hour12: false });
@@ -209,9 +225,7 @@ function renderBoard(s) {
 
   for (const sh of s.shards || []) {
     const e = ensureShard(sh.id);
-    const size = shardSize(sh.load);
-    e.style.setProperty("--size", `${size}px`);
-    e.style.setProperty("--heat", heatColor(sh.load));
+    paintShard(e, sh.load);
     e.querySelector("small").textContent = `${Math.round(sh.load)} rps`;
     e.classList.toggle("hot", sh.target > sh.base);
     e.title = `Shard ${sh.id}: target ${sh.target} RPS, reported ${sh.load} RPS`;
@@ -303,4 +317,5 @@ function renderEvents(events) {
   list.innerHTML = events.map((e) => `<li class="ev-${e.kind}"><time>${timeOf(e.t)}</time>${e.text}</li>`).join("");
 }
 
+document.querySelectorAll(".help [data-rps]").forEach((e) => paintShard(e, Number(e.dataset.rps)));
 connect();

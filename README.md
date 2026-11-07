@@ -59,6 +59,8 @@ demo-controller            web UI, process lifecycle, workload demand table
 
 After 90s without any visitor action, the playground resets by itself (`-idle-reset`).
 
+Press `?` (or the `?` button in the corner) to open a short guide that explains the screen to a visitor.
+
 ## Booth script (30-60 seconds)
 
 1. "These are 3 real processes running 16 shards. Load balancing is off, so look at the imbalance:
