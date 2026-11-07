@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Shard Manager Playground</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <div class="title">
+      <h1>Shard Manager Playground</h1>
+      <p>Break the balance. Watch it recover.</p>
+    </div>
+    <div class="meter" id="meter" title="Busiest worker's reported load divided by the average">
+      <span class="meter-value" id="imbalance">1.00×</span>
+      <span class="meter-label">load imbalance<br>busiest / average</span>
+    </div>
+    <button class="toggle" id="balancing" aria-pressed="false">
+      <span class="toggle-track"><span class="toggle-thumb"></span></span>
+      <span class="toggle-text">
+        <strong id="balancing-state">Load balancing OFF</strong>
+        <small id="balancing-hint">Click to turn on Shard Manager</small>
+      </span>
+    </button>
+  </header>
+
+  <div class="narration" id="narration">Connecting…</div>
+
+  <main>
+    <section class="board">
+      <div class="workers" id="workers"></div>
+      <div class="unassigned hidden" id="unassigned-wrap">
+        <span>Unassigned</span>
+        <div class="shards" id="unassigned"></div>
+      </div>
+      <div class="legend">
+        <span>Each square is a shard. Size and color show its load (requests/sec).</span>
+        <span class="legend-scale"><i class="l1"></i><i class="l2"></i><i class="l3"></i><i class="l4"></i> cool → hot</span>
+      </div>
+    </section>
+
+    <aside>
+      <section class="panel moves-panel">
+        <h2>Shard moves <small>decided by Shard Manager</small></h2>
+        <ol class="moves" id="moves"><li class="empty">No moves yet</li></ol>
+      </section>
+      <section class="panel">
+        <h2>CPU per process <small>measured by the OS, not by Shard Manager</small></h2>
+        <div class="cpu" id="cpu"></div>
+      </section>
+      <section class="panel events-panel">
+        <h2>Event log</h2>
+        <ol class="events" id="events"></ol>
+      </section>
+    </aside>
+  </main>
+
+  <footer>
+    <button class="action heat" id="heat-mode">Heat up a shard</button>
+    <button class="action kill" id="kill-mode">Kill a worker</button>
+    <button class="action add" id="add">Add a worker</button>
+    <button class="action reset" id="reset">Reset</button>
+    <span class="mode-hint" id="mode-hint"></span>
+    <span class="idle" id="idle"></span>
+  </footer>
+
+  <div class="overlay hidden" id="overlay"><div id="overlay-text">Resetting…</div></div>
+  <div class="toast hidden" id="toast"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,48 @@
+# shard-manager-server config for the playground. Loaded by the controller via
+# `shard-manager-server --root <repo> --config config --env development start`.
+rpc:
+  grpcPort: 7943
+  bindOnLocalHost: true
+
+metrics:
+  statsd:
+    hostPort: "127.0.0.1:8125"
+    prefix: "playground"
+
+pprof:
+  port: 7942
+
+clusterGroupMetadata:
+  currentClusterName: "cluster0"
+
+dynamicconfig:
+  client: filebased
+  filebased:
+    # Written by the controller; the server enforces a 5s minimum poll interval.
+    filepath: ".run/dynamicconfig.yaml"
+    pollInterval: "5s"
+
+shardDistribution:
+  election:
+    leaderPeriod: 60s
+    maxRandomDelay: 1s
+    failedElectionCooldown: 1s
+  namespaces:
+    - name: playground
+      type: fixed
+      shardNum: 16
+  leaderStore:
+    storageParams:
+      endpoints:
+        - ${ETCD_ENDPOINTS:"127.0.0.1:2379"}
+      dialTimeout: 1s
+      prefix: "leader"
+  store:
+    storageParams:
+      endpoints:
+        - ${ETCD_ENDPOINTS:"127.0.0.1:2379"}
+      dialTimeout: 1s
+      prefix: "store"
+  process:
+    period: 1s
+    heartbeatTTL: 2s
