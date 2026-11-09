@@ -22,18 +22,22 @@ const (
 )
 
 type snapshot struct {
-	Workers     []workerView `json:"workers"`
-	Shards      []shardView  `json:"shards"`
-	Balancing   bool         `json:"balancing"`
-	PendingMs   int64        `json:"balancingPendingMs"`
-	Imbalance   float64      `json:"imbalance"`
-	Moves       []Move       `json:"moves"`
-	Events      []Event      `json:"events"`
-	Narration   string       `json:"narration"`
-	Busy        string       `json:"busy"`
-	IdleResetIn int          `json:"idleResetIn"`
-	SMOK        bool         `json:"smOK"`
-	NowMs       int64        `json:"now"`
+	Workers        []workerView `json:"workers"`
+	Shards         []shardView  `json:"shards"`
+	ManagerOn      bool         `json:"managerOn"`
+	PendingMs      int64        `json:"managerPendingMs"`
+	TurningOff     bool         `json:"managerTurningOff"`
+	Imbalance      float64      `json:"imbalance"`
+	Moves          []Move       `json:"moves"`
+	Events         []Event      `json:"events"`
+	Narration      string       `json:"narration"`
+	Busy           string       `json:"busy"`
+	IdleResetIn    int          `json:"idleResetIn"`
+	SMOK           bool         `json:"smOK"`
+	SMExecutors    int          `json:"smExecutors"`
+	MaxWorkers     int          `json:"maxWorkers"`
+	HeartbeatTTLMs int64        `json:"heartbeatTTLMs"`
+	NowMs          int64        `json:"now"`
 }
 
 type workerView struct {
@@ -45,6 +49,9 @@ type workerView struct {
 	Load    float64   `json:"load"`
 	CPU     float64   `json:"cpu"`
 	CPUHist []float64 `json:"cpuHistory"`
+	// LastHeartbeatMs is when Shard Manager last heard from the worker, or 0 if
+	// Shard Manager does not know it.
+	LastHeartbeatMs int64 `json:"lastHeartbeat"`
 }
 
 type shardView struct {
@@ -58,16 +65,28 @@ type shardView struct {
 func (c *Controller) snapshotLocked() snapshot {
 	now := time.Now()
 	s := snapshot{
-		Workers:     []workerView{},
-		Balancing:   c.balancing,
-		Moves:       append([]Move{}, c.moves...),
-		Events:      append([]Event{}, c.events...),
-		Busy:        c.busy,
-		IdleResetIn: -1,
-		SMOK:        c.smOK,
-		NowMs:       now.UnixMilli(),
+		Workers:        []workerView{},
+		ManagerOn:      c.managerOn,
+		TurningOff:     c.turningOff,
+		Moves:          append([]Move{}, c.moves...),
+		Events:         append([]Event{}, c.events...),
+		Busy:           c.busy,
+		IdleResetIn:    -1,
+		SMOK:           c.smOK,
+		MaxWorkers:     maxWorkers,
+		HeartbeatTTLMs: heartbeatTTL.Milliseconds(),
+		NowMs:          now.UnixMilli(),
 	}
-	if pending := c.balancingChangedAt.Add(dynamicConfigApplyDelay * time.Millisecond).Sub(now); pending > 0 {
+	if c.state != nil {
+		s.SMExecutors = len(c.state.Executors)
+	}
+	// A restart for switching is expected, not an outage.
+	if c.restarting {
+		s.SMOK = true
+	}
+	if c.restarting && c.managerOn {
+		s.PendingMs = resumeDelay.Milliseconds()
+	} else if pending := c.managerChangedAt.Add(resumeDelay).Sub(now); pending > 0 {
 		s.PendingMs = pending.Milliseconds()
 	}
 	if c.dirty && c.busy == "" {
@@ -94,7 +113,7 @@ func (c *Controller) snapshotLocked() snapshot {
 	for i := range workload.ShardCount {
 		id := strconv.Itoa(i)
 		s.Shards = append(s.Shards, shardView{
-			ID: id, Owner: owner[id], Target: c.demand[id], Base: base[id], Load: c.shardLoadLocked(id),
+			ID: id, Owner: owner[id], Target: c.demand[id], Base: base[id], Load: c.shardLoadLocked(id, owner[id]),
 		})
 	}
 
@@ -104,16 +123,17 @@ func (c *Controller) snapshotLocked() snapshot {
 		slices.SortFunc(shards, func(a, b string) int { return shardNum(a) - shardNum(b) })
 		load := 0.0
 		for _, shard := range shards {
-			load += c.shardLoadLocked(shard)
+			load += c.shardLoadLocked(shard, index)
 		}
 		v := workerView{
-			Index:   index,
-			Process: w.proc.name,
-			PID:     w.proc.pid(),
-			State:   c.workerStateLocked(w),
-			Shards:  shards,
-			Load:    math.Round(load),
-			CPUHist: append([]float64{}, w.cpu...),
+			Index:           index,
+			Process:         w.proc.name,
+			PID:             w.proc.pid(),
+			State:           c.workerStateLocked(w),
+			Shards:          shards,
+			Load:            math.Round(load),
+			CPUHist:         append([]float64{}, w.cpu...),
+			LastHeartbeatMs: c.lastHeartbeatLocked(w),
 		}
 		if len(w.cpu) > 0 {
 			v.CPU = w.cpu[len(w.cpu)-1]
@@ -124,6 +144,19 @@ func (c *Controller) snapshotLocked() snapshot {
 	s.Imbalance = imbalance(s.Workers)
 	s.Narration = c.narrationLocked(s, now)
 	return s
+}
+
+// lastHeartbeatLocked returns when Shard Manager last heard from the worker, or 0
+// if Shard Manager does not know it.
+func (c *Controller) lastHeartbeatLocked(w *workerState) int64 {
+	if c.state == nil || w.executorID == "" {
+		return 0
+	}
+	hb := c.state.Executors[w.executorID]
+	if hb == nil {
+		return 0
+	}
+	return hb.GetLastHeartbeat().UnixMilli()
 }
 
 func (c *Controller) workerStateLocked(w *workerState) string {
@@ -141,22 +174,42 @@ func (c *Controller) workerStateLocked(w *workerState) string {
 	return stateRunning
 }
 
-// imbalance is max/mean of reported load across running workers: 1.0 is perfect.
+const (
+	// maxImbalance caps the ratio when the quietest worker has (almost) no load.
+	maxImbalance = 10
+	// balancedImbalance is what load balancing reliably reaches with the baseline workload.
+	balancedImbalance = 1.3
+)
+
+// imbalance is the busiest running worker's load divided by the quietest's:
+// 1.0 is perfect.
 func imbalance(workers []workerView) float64 {
-	var total, peak float64
-	n := 0
-	for _, w := range workers {
-		if w.State != stateRunning {
-			continue
-		}
-		total += w.Load
-		peak = max(peak, w.Load)
-		n++
-	}
-	if n < 2 || total == 0 {
+	busiest, quietest := extremes(workers)
+	if busiest == nil || busiest == quietest || busiest.Load == 0 {
 		return 1
 	}
-	return math.Round(peak/(total/float64(n))*100) / 100
+	if quietest.Load*maxImbalance <= busiest.Load {
+		return maxImbalance
+	}
+	return math.Round(busiest.Load/quietest.Load*100) / 100
+}
+
+// extremes returns the busiest and quietest running workers that own shards,
+// or nil if there are none. A worker that just registered has no shards yet.
+func extremes(workers []workerView) (busiest, quietest *workerView) {
+	for i := range workers {
+		w := &workers[i]
+		if w.State != stateRunning || len(w.Shards) == 0 {
+			continue
+		}
+		if busiest == nil || w.Load > busiest.Load {
+			busiest = w
+		}
+		if quietest == nil || w.Load < quietest.Load {
+			quietest = w
+		}
+	}
+	return busiest, quietest
 }
 
 // narrationLocked explains the current situation in one sentence, using only
@@ -165,15 +218,27 @@ func (c *Controller) narrationLocked(s snapshot, now time.Time) string {
 	if s.Busy != "" {
 		return s.Busy
 	}
+	if c.turningOff {
+		return "Turning off: the shards go back to being placed by count, without looking at load…"
+	}
+	if c.restarting {
+		return "Turning on Shard Manager…"
+	}
 	if !s.SMOK {
 		return "Waiting for Shard Manager…"
+	}
+	if !s.ManagerOn {
+		return offNarration(s, now)
 	}
 	if c.placing {
 		return "Workers are registering. Shard Manager is placing the shards…"
 	}
+	if s.PendingMs > 0 {
+		return "Shard Manager is on. It looks at each worker's load and starts moving shards…"
+	}
 	for _, w := range s.Workers {
 		if w.State == stateDead && len(w.Shards) > 0 {
-			return fmt.Sprintf("Worker %d died. Shard Manager will notice when its heartbeat expires (2s)…", w.Index)
+			return fmt.Sprintf("Worker %d was killed. Its heartbeats stopped, so Shard Manager moves its shards once the %s TTL passes.", w.Index, heartbeatTTL)
 		}
 	}
 
@@ -198,43 +263,70 @@ func (c *Controller) narrationLocked(s snapshot, now time.Time) string {
 		}
 		switch {
 		case count[reasonRecovery] > 0:
-			return fmt.Sprintf("Recovery: Shard Manager reassigned %s of the dead worker to the survivors%s",
+			return fmt.Sprintf("Shard Manager moved %s from the dead worker to the others%s.",
 				plural(count[reasonRecovery], "shard"), also)
 		case count[reasonNewWorker] > 0:
-			return fmt.Sprintf("Worker %d joined: Shard Manager handed it %s%s", newWorker, plural(count[reasonNewWorker], "shard"), also)
+			return fmt.Sprintf("Worker %d joined, and Shard Manager gave it %s%s.", newWorker, plural(count[reasonNewWorker], "shard"), also)
 		default:
-			return fmt.Sprintf("Shard Manager moved %s to even out the load", plural(count[reasonRebalance], "shard"))
+			return fmt.Sprintf("Shard Manager moved %s to even out the load.", plural(count[reasonRebalance], "shard"))
 		}
 	}
 
-	if s.PendingMs > 0 {
-		state := "OFF"
-		if s.Balancing {
-			state = "ON"
-		}
-		return fmt.Sprintf("Turning load balancing %s. Shard Manager picks up the new config within ~5s…", state)
+	busiest, _ := extremes(s.Workers)
+	if busiest == nil {
+		return ""
 	}
-	busiest := 0
-	var peak float64
-	var busiestShards []string
+	switch {
+	case s.Imbalance > balancedImbalance && len(busiest.Shards) == 1:
+		return fmt.Sprintf("Worker %d now runs only shard %s. One shard can't be split, so Shard Manager moved the rest away from it.",
+			busiest.Index, busiest.Shards[0])
+	case s.Imbalance <= balancedImbalance:
+		return "Balanced. Every worker does about the same work."
+	default:
+		return fmt.Sprintf("Worker %d is overloaded. Shard Manager moves shards a few at a time.", busiest.Index)
+	}
+}
+
+// offNarration explains placement without Shard Manager: by count only.
+func offNarration(s snapshot, now time.Time) string {
 	for _, w := range s.Workers {
-		if w.State == stateRunning && w.Load > peak {
-			busiest, peak, busiestShards = w.Index, w.Load, w.Shards
+		if w.State == stateDead && len(w.Shards) > 0 {
+			return fmt.Sprintf("Worker %d was killed. Once its %s heartbeat TTL passes, its shards are spread over the others by count.",
+				w.Index, heartbeatTTL)
+		}
+	}
+	for _, w := range s.Workers {
+		if w.State == stateStarting {
+			return fmt.Sprintf("Worker %d is starting. It gets an equal number of shards, whatever their load.", w.Index)
+		}
+	}
+	recovered, joined, joiner := 0, 0, 0
+	for _, m := range s.Moves {
+		if now.UnixMilli()-m.AtMs >= 6000 {
+			continue
+		}
+		switch m.Reason {
+		case reasonRecovery:
+			recovered++
+		case reasonNewWorker:
+			joined, joiner = joined+1, m.To
 		}
 	}
 	switch {
-	case s.Balancing && s.Imbalance > 1.2 && len(busiestShards) == 1:
-		return fmt.Sprintf("Worker %d now runs only Shard %s. A single shard can't be split, so Shard Manager moved everything else away from it.",
-			busiest, busiestShards[0])
-	case !s.Balancing && s.Imbalance >= 1.3:
-		return fmt.Sprintf("Load balancing is OFF: Worker %d does %.1fx the average work. Turn on Shard Manager!", busiest, s.Imbalance)
-	case !s.Balancing:
-		return "Load balancing is OFF: shards only move when a worker joins or dies. Try heating up a shard."
-	case s.Imbalance <= 1.2:
-		return "Balanced: every worker is close to the average load. Now try to break it!"
-	default:
-		return fmt.Sprintf("Shard Manager sees Worker %d overloaded and is rebalancing (moves are paced on purpose)…", busiest)
+	case recovered > 0:
+		return fmt.Sprintf("The dead worker's %s were spread over the others by count, whatever their load.", plural(recovered, "shard"))
+	case joined > 0:
+		return fmt.Sprintf("Worker %d joined and got %s by count, whatever their load.", joiner, plural(joined, "shard"))
 	}
+	busiest, quietest := extremes(s.Workers)
+	if busiest != nil && s.Imbalance >= 1.5 {
+		ratio := fmt.Sprintf("%.1f×", s.Imbalance)
+		if s.Imbalance >= maxImbalance {
+			ratio = fmt.Sprintf("over %d×", maxImbalance)
+		}
+		return fmt.Sprintf("Shards are placed by count, not load: Worker %d does %s the work of Worker %d.", busiest.Index, ratio, quietest.Index)
+	}
+	return "Shard Manager is off. Shards are placed by count, not load."
 }
 
 func plural(n int, word string) string {

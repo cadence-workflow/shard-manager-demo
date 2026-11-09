@@ -30,13 +30,19 @@ import (
 )
 
 const (
-	observeInterval  = 500 * time.Millisecond
+	// observeInterval is several times faster than the workers' 2s heartbeat,
+	// so the UI sees every heartbeat arrive.
+	observeInterval  = 250 * time.Millisecond
 	cpuInterval      = time.Second
 	cpuHistoryLen    = 60
 	joinedRecentlyMs = 10_000
 	maxMoves         = 30
 	maxEvents        = 40
 	maxWorkers       = 8
+
+	// heartbeatTTL must match shardDistribution.process.heartbeatTTL in
+	// config/development.yaml. It is only used to explain what Shard Manager does.
+	heartbeatTTL = 4 * time.Second
 )
 
 // Config is set from command-line flags.
@@ -58,10 +64,17 @@ type workerState struct {
 	killed     bool
 	executorID string
 	joinedAt   time.Time
+	// baseline workers got their shards in the initial placement, so later
+	// moves to them are not "a new worker joined".
+	baseline bool
 
 	cpu        []float64
 	lastCPU    time.Duration
 	lastSample time.Time
+
+	// loads is what the worker itself last reported running, per shard.
+	loads   map[string]float64
+	loadsAt time.Time
 }
 
 // Event is a user action or an observed lifecycle change.
@@ -79,27 +92,38 @@ type Controller struct {
 	cancel context.CancelFunc
 	http   *http.Server
 
-	mu                 sync.Mutex
-	demand             map[string]float64
-	workers            map[int]*workerState
-	nextIndex          int
-	balancing          bool
-	balancingChangedAt time.Time
-	lastOwner          map[string]int
-	moves              []Move
-	events             []Event
-	busy               string
-	dirty              bool
-	lastActivity       time.Time
-	smOK               bool
-	state              *types.GetFullNamespaceStateResponse
+	// server is the shard-manager-server process. "Off" runs it with load
+	// balancing disabled, so it places shards by count only; switching
+	// restarts it, because a running server takes up to 5s to read config.
+	server *proc
+
+	mu               sync.Mutex
+	demand           map[string]float64
+	workers          map[int]*workerState
+	nextIndex        int
+	managerOn        bool
+	managerChangedAt time.Time
+	lastOwner        map[string]int
+	moves            []Move
+	events           []Event
+	busy             string
+	dirty            bool
+	lastActivity     time.Time
+	smOK             bool
+	state            *types.GetFullNamespaceStateResponse
 
 	// While the baseline workers register, Shard Manager hands shards from the
 	// first worker to the next ones. Those moves are summarised as one
 	// "initial placement" event instead of filling the moves list.
+	// lastPlacingMove is zero until the placement moved a shard.
 	placing         bool
 	placingUntil    time.Time
 	lastPlacingMove time.Time
+	// turningOff lasts from the visitor turning Shard Manager off until the
+	// count-based placement after the namespace reset is done.
+	turningOff bool
+	// restarting is set while shard-manager-server restarts with new config.
+	restarting bool
 }
 
 // Module runs the controller inside an fx app next to smclient.Module.
@@ -145,6 +169,9 @@ func (c *Controller) start() error {
 	go c.loop(ctx, time.Second, c.checkIdle)
 
 	c.addEvent("system", "Playground started")
+	c.mu.Lock()
+	c.busy = "Starting Shard Manager and workers…"
+	c.mu.Unlock()
 	c.spawnBaseline()
 	log.Printf("playground ready: http://%s", c.cfg.Listen)
 	return nil
@@ -173,17 +200,50 @@ func (c *Controller) startInfrastructure() error {
 		return fmt.Errorf("etcd: %w", err)
 	}
 
+	// The playground starts with Shard Manager "off": placement by count only.
 	if err := writeDynamicConfig(c.dynamicConfigPath(), false); err != nil {
 		return err
 	}
-	c.balancingChangedAt = time.Now()
-	if _, err := c.procs.start("shard-manager-server", c.cfg.ServerBin, ".",
-		"--root", ".", "--config", "config", "--env", "development",
-		"start", "--services", "shard-distributor",
-	); err != nil {
+	server, err := c.startServer()
+	if err != nil {
 		return err
 	}
+	c.server = server
 	return c.waitForServer(30 * time.Second)
+}
+
+// restartServer restarts shard-manager-server with load balancing on or off.
+// Assignments live in etcd, and workers keep their shards while it is down.
+func (c *Controller) restartServer(balancing bool) error {
+	if err := writeDynamicConfig(c.dynamicConfigPath(), balancing); err != nil {
+		return err
+	}
+	c.server.stop(3 * time.Second)
+	server, err := c.startServer()
+	if err != nil {
+		return err
+	}
+	c.mu.Lock()
+	c.server = server
+	c.mu.Unlock()
+	return c.waitForServer(15 * time.Second)
+}
+
+// resetNamespace makes Shard Manager forget every executor and assignment.
+func (c *Controller) resetNamespace() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_, err := c.sm.ForceResetNamespace(ctx, &types.ForceResetNamespaceRequest{Namespace: smclient.Namespace})
+	return err
+}
+
+// startServer starts shard-manager-server. It reads the dynamic config at
+// startup, unlike a running server, which polls it every few seconds.
+func (c *Controller) startServer() (*proc, error) {
+	return c.procs.start("shard-manager-server", c.cfg.ServerBin, ".",
+		"--root", ".", "--config", "config", "--env", "development",
+		"start", "--services", "shard-distributor",
+	)
 }
 
 func (c *Controller) dynamicConfigPath() string {
@@ -250,7 +310,7 @@ func (c *Controller) loop(ctx context.Context, every time.Duration, fn func()) {
 
 func (c *Controller) spawnBaseline() {
 	c.mu.Lock()
-	c.placing, c.placingUntil, c.lastPlacingMove = true, time.Now().Add(15*time.Second), time.Now()
+	c.placing, c.placingUntil, c.lastPlacingMove = true, time.Now().Add(15*time.Second), time.Time{}
 	c.mu.Unlock()
 	for range c.cfg.Workers {
 		if err := c.spawnWorker(); err != nil {
@@ -348,7 +408,7 @@ func (c *Controller) applyStateLocked(resp *types.GetFullNamespaceStateResponse)
 		case w.joinedAt.IsZero():
 			c.addEventLocked("system", fmt.Sprintf("Worker %d exited before registering", index))
 		case w.killed:
-			c.addEventLocked("system", fmt.Sprintf("Shard Manager declared Worker %d dead (no heartbeat for 2s)", index))
+			c.addEventLocked("system", fmt.Sprintf("Shard Manager declared Worker %d dead (no heartbeat for %s)", index, heartbeatTTL))
 		default:
 			c.addEventLocked("system", fmt.Sprintf("Worker %d drained and left", index))
 		}
@@ -366,7 +426,7 @@ func (c *Controller) applyStateLocked(resp *types.GetFullNamespaceStateResponse)
 		hb := present[index]
 		facts[index] = workerFacts{
 			dead:           !w.proc.alive() || (hb != nil && hb.Status != types.ExecutorStatusACTIVE),
-			joinedRecently: !w.joinedAt.IsZero() && now.Sub(w.joinedAt) < joinedRecentlyMs*time.Millisecond,
+			joinedRecently: !w.baseline && !w.joinedAt.IsZero() && now.Sub(w.joinedAt) < joinedRecentlyMs*time.Millisecond,
 		}
 	}
 	for _, from := range c.lastOwner {
@@ -387,10 +447,10 @@ func (c *Controller) applyStateLocked(resp *types.GetFullNamespaceStateResponse)
 	}
 	for i := range moves {
 		moves[i].AtMs = now.UnixMilli()
-		moves[i].Load = c.shardLoadLocked(moves[i].Shard)
-		if c.balancing && moves[i].Reason == reasonRebalance {
-			// A load-based move proves the server already applied the new config.
-			c.balancingChangedAt = time.Time{}
+		moves[i].Load = c.shardLoadLocked(moves[i].Shard, moves[i].To)
+		if moves[i].Reason == reasonRebalance {
+			// A load-based move proves Shard Manager is back at work.
+			c.managerChangedAt = time.Time{}
 		}
 	}
 	slices.Reverse(moves)
@@ -400,8 +460,12 @@ func (c *Controller) applyStateLocked(resp *types.GetFullNamespaceStateResponse)
 	}
 }
 
-// trackPlacementLocked ends the initial placement once every worker has
-// registered, all shards are owned and nothing moved for 2s.
+// trackPlacementLocked ends the placement once it moved shards, every worker
+// has registered and owns shards, nothing moved for 500ms and every worker
+// runs exactly the shards it was given (workers learn their shards from
+// heartbeat responses, a moment after Shard Manager decides). Shard Manager
+// only hands shards to empty workers here, so the shard counts can differ by
+// more than one.
 func (c *Controller) trackPlacementLocked(now time.Time, moved bool) {
 	if moved {
 		c.lastPlacingMove = now
@@ -410,9 +474,10 @@ func (c *Controller) trackPlacementLocked(now time.Time, moved bool) {
 	for _, index := range c.lastOwner {
 		counts[index]++
 	}
-	settled := len(c.lastOwner) == workload.ShardCount && now.Sub(c.lastPlacingMove) > 2*time.Second
+	settled := len(c.lastOwner) == workload.ShardCount &&
+		!c.lastPlacingMove.IsZero() && now.Sub(c.lastPlacingMove) > 500*time.Millisecond
 	for index, w := range c.workers {
-		if w.joinedAt.IsZero() || counts[index] == 0 {
+		if w.joinedAt.IsZero() || counts[index] == 0 || !c.runsAssignedLocked(w, counts[index]) {
 			settled = false
 		}
 	}
@@ -420,26 +485,51 @@ func (c *Controller) trackPlacementLocked(now time.Time, moved bool) {
 		return
 	}
 	c.placing = false
+	for _, w := range c.workers {
+		w.baseline = true
+	}
 	parts := make([]string, 0, len(counts))
 	for _, index := range slices.Sorted(maps.Keys(counts)) {
 		parts = append(parts, fmt.Sprintf("W%d: %d", index, counts[index]))
 	}
 	c.addEventLocked("system", "Shard Manager placed the shards by count ("+strings.Join(parts, ", ")+")")
+	if c.turningOff {
+		c.turningOff, c.managerOn = false, false
+		c.addEventLocked("action", "Shard Manager turned OFF: shards are placed by count only")
+	}
+	c.busy = ""
 }
 
-// shardLoadLocked is the load the current owner last reported, falling back to
-// Shard Manager's smoothed load right after a move.
-func (c *Controller) shardLoadLocked(shard string) float64 {
-	if c.state == nil {
+// runsAssignedLocked reports whether the worker's latest load report covers
+// exactly the assigned shards it owns.
+func (c *Controller) runsAssignedLocked(w *workerState, assigned int) bool {
+	if time.Since(w.loadsAt) > loadReportTTL || len(w.loads) != assigned {
+		return false
+	}
+	for shard := range w.loads {
+		if c.lastOwner[shard] != w.index {
+			return false
+		}
+	}
+	return true
+}
+
+// loadReportTTL covers a few of the workers' 500ms demand polls.
+const loadReportTTL = 2 * time.Second
+
+// shardLoadLocked is the load the shard's owner reports running. A shard whose
+// owner is dead runs nowhere, so its load is 0.
+func (c *Controller) shardLoadLocked(shard string, owner int) float64 {
+	w := c.workers[owner]
+	if w == nil || !w.proc.alive() || time.Since(w.loadsAt) > loadReportTTL {
 		return 0
 	}
-	for executorID, assigned := range c.state.ShardAssignments {
-		if _, ok := assigned.GetAssignedShards()[shard]; !ok {
-			continue
-		}
-		if report, ok := c.state.Executors[executorID].GetReportedShards()[shard]; ok {
-			return report.GetShardLoad()
-		}
+	if load := w.loads[shard]; load > 0 {
+		return load
+	}
+	// Right after a move the new owner has not measured the shard yet.
+	if c.state == nil {
+		return 0
 	}
 	return c.state.ShardStats[shard].GetSmoothedLoad()
 }
@@ -481,7 +571,7 @@ func (c *Controller) checkIdle() {
 	c.mu.Unlock()
 	if idle {
 		go func() {
-			if err := c.reset("No one touched the playground for a while"); err != nil && !errors.Is(err, errBusy) {
+			if err := c.reset("No one touched the playground for a while"); err != nil && !errors.Is(err, errBusy) && !errors.Is(err, errSwitching) {
 				log.Print(err)
 			}
 		}()

@@ -3,19 +3,20 @@
 **Break the balance. Watch it recover.**
 
 A small interactive demo of the real [Shard Manager](https://github.com/cadence-workflow/shard-manager).
-Three real worker processes own 16 shards and burn real CPU for them. Visitors heat up shards,
+Three real worker processes own 32 shards and burn real CPU for them. Visitors heat up shards,
 kill workers, and add workers. The real Shard Manager decides where every shard goes.
 
 Nothing is simulated: the UI only shows what Shard Manager reports, and the CPU numbers come
 from the OS.
 
-**Load balancing OFF.** Shards are placed only by count, so Worker 3 does 1.6× the average work:
+**Shard Manager OFF.** Shards are placed by count only, as without Shard Manager, so one worker
+does far more than another:
 
-![Load balancing OFF](docs/1-balancing-off.png)
+![Shard Manager OFF](docs/1-balancing-off.png)
 
-**Load balancing ON.** A few seconds later Shard Manager moves one hot shard, and the load is even (1.03×):
+**Shard Manager ON.** Within a couple of seconds it moves a few shards, and the load is even:
 
-![Load balancing ON](docs/2-balancing-on.png)
+![Shard Manager ON](docs/2-balancing-on.png)
 
 **Kill a worker.** Shard Manager notices the missing heartbeat and moves its shards to the survivors:
 
@@ -48,16 +49,17 @@ make demo ETCD_BIN=
 ```
 demo-controller            web UI, process lifecycle, workload demand table
 ├── playground-etcd        fresh data dir on every start
-├── shard-manager-server   real server, config in config/, namespace "playground" (fixed, 16 shards)
+├── shard-manager-server   real server, config in config/, namespace "playground" (fixed, 32 shards)
 └── demo-worker-1..N       real executors (executorclient), one OS process each
 ```
 
-- **Workers** register with Shard Manager through the real `executorclient` (heartbeat every 500ms).
+- **Workers** register with Shard Manager through the real `executorclient` (heartbeat every 2s, with a 4s TTL).
   For each shard they are assigned, they run requests at the shard's target rate. One request is a
   fixed piece of integer math (~2ms on an M-series performance core). Each worker reports the rate it
   actually completed as the shard load (`ShardReport.ShardLoad`).
-- **The workload generator** is the controller's demand table (`GET /api/demand`): the target RPS per
-  shard. Workers only run demand for shards they own, so the work follows ownership.
+- **The workload generator** is the controller's demand table (`/api/demand`): the target RPS per
+  shard. Workers only run demand for shards they own, so the work follows ownership. With every
+  poll they also report the load of the shards they run, which the UI shows.
 - **Shard Manager** decides placement with its greedy load balancer. The controller only reads
   state (`GetFullNamespaceState`) and turns differences between two reads into the moves list.
 - **CPU** in the UI is per-process CPU time from `ps` (macOS) or `/proc` (Linux). It is
@@ -67,11 +69,11 @@ demo-controller            web UI, process lifecycle, workload demand table
 
 | Action | What really happens |
 | --- | --- |
-| Load balancing ON/OFF | Rewrites dynamic config `moveBudgetProportion` (0 = no load-based moves). The server reads it within ~5s. |
-| Heat up a shard | Raises that shard's target RPS 5x (min 200, max 360). The owner burns more CPU and reports more load. |
-| Kill a worker | `SIGKILL`, with no draining. Shard Manager notices after the 2s heartbeat TTL and reassigns the shards. |
-| Add a worker | Starts a new process. Shard Manager gives it a share of shards, and load balancing tunes it further. |
-| Reset | Drains all workers, waits until Shard Manager forgets them, then starts 3 fresh ones with balancing OFF. |
+| Shard Manager ON/OFF | Restarts the real `shard-manager-server` with greedy load balancing enabled (ON, ~1s) or disabled (OFF). OFF also wipes the namespace (`ForceResetNamespace`), so the shards are placed by count again as the workers re-register (~5s). |
+| Heat up a shard | Raises that shard's target RPS 5x (min 100, max 180). The owner burns more CPU and reports more load. |
+| Kill a worker | `SIGKILL`, with no draining. After the 4s heartbeat TTL the shards go to the survivors: by load when ON, by count when OFF. |
+| Add a worker | Starts a new process. It gets a share of shards by count; when ON, load balancing tunes it further. |
+| Reset | Drains all workers, restarts the server with load balancing disabled, wipes the namespace and places 3 fresh workers by count. |
 
 After 90s without any visitor action, the playground resets by itself (`-idle-reset`).
 
@@ -79,16 +81,18 @@ Press `?` (or the `?` button in the corner) to open a short guide that explains 
 
 ## Booth script (30-60 seconds)
 
-1. "These are 3 real processes running 16 shards. Load balancing is off, so look at the imbalance:
-   one worker does 1.5-2x the average work. You can see it in the CPU column too."
-2. Visitor clicks **Load balancing ON**. Within a few seconds Shard Manager moves 2-4 shards and
-   the meter goes green.
-3. Visitor clicks a big shard. It becomes HOT, and Shard Manager moves the other shards away from
+1. "These are 3 real processes running 32 shards. Without Shard Manager they are spread by count,
+   so look at the imbalance: one worker does several times the work of another. You can see it
+   in the CPU numbers too."
+2. Optionally, the visitor adds or kills a worker first: shards move by count, and the
+   imbalance stays.
+3. Visitor turns **Shard Manager ON**. Within a couple of seconds it moves a few shards, and the
+   meter goes green.
+4. Visitor clicks a big shard. It becomes HOT, and Shard Manager moves the other shards away from
    its worker.
-4. Visitor kills a worker. The card greys out, and ~2s later the shards appear on the survivors
-   (`recovery` in the moves list).
-5. Visitor adds a worker. It joins and gets shards.
-6. **Reset** for the next visitor.
+5. Visitor kills a worker. Its wire counts down the 4s TTL, then the shards slide to the survivors.
+6. Visitor adds a worker. It joins and gets shards.
+7. **Reset** for the next visitor.
 
 ## Show the processes outside the browser
 
@@ -103,20 +107,30 @@ The workers appear as `demo-worker-1`, `demo-worker-2`, ... in `ps`, `top` and `
 
 - **Faster balancer knobs.** The greedy balancer is tuned through its real dynamic config keys, for
   this namespace only (`internal/controller/dynconfig.go`): 3s load smoothing instead of 1m, 5s
-  per-shard cooldown instead of 1m, and 20% move budget instead of 1%. The algorithm is unchanged;
-  it just reacts within seconds instead of minutes.
-- **The baseline is skewed on purpose** (`internal/workload/work.go`): four heavy shards and a long
-  tail. Shard Manager places the first shards by count, so with balancing OFF the workers are
-  visibly imbalanced most of the time. The exact numbers change with every reset, because the
+  per-shard cooldown instead of 1m, 20% move budget instead of 1%, and hysteresis bands of
+  1.05/0.95 instead of 1.15/0.90. The algorithm is unchanged; it just reacts within seconds instead
+  of minutes.
+- **The baseline is skewed on purpose** (`internal/workload/work.go`): eight heavy shards and a long
+  tail. With load balancing disabled Shard Manager places shards by count only, so while it is off
+  the workers are visibly imbalanced most of the time. The exact numbers vary, because the
   placement is Shard Manager's.
+- **Greedy moves one shard at a time.** If one worker holds two heavy shards and moving either
+  would just overload another worker, greedy stops there. It does not swap shards. That is why
+  the playground uses 32 smaller shards and caps a heated shard at 180 RPS: no shard is more than
+  about half a worker's share, so there is almost always a shard small enough to close the gap.
 - **A single hot shard cannot be split.** If one shard is hotter than an average worker,
   Shard Manager leaves it alone on its worker and moves everything else away. The narration
   explains this when it happens.
 - **Pull model for demand.** Workers poll the demand table instead of receiving routed requests.
   This keeps the demo simple, and no request is lost while a shard moves. Workers exit if the
   controller is unreachable for 3s, so they never become orphans.
-- **The ON/OFF toggle takes up to ~5s.** The file-based dynamic config has a 5s minimum poll
-  interval. Failure recovery and new-worker placement always run, even with balancing OFF.
+- **OFF is Shard Manager without load balancing.** The server keeps running so new and dead
+  workers are still handled, by count, like a naive placement would. The UI shows it as off:
+  no heartbeats travel and the box is dashed. Switching restarts the server, because a running
+  server takes up to 5s to read a dynamic config change; workers keep their shards meanwhile.
+- **Turning OFF re-places the shards by count.** Disabling load balancing alone would keep the
+  balance it reached; wiping the namespace makes OFF always show what count-only placement
+  looks like.
 
 ## Layout
 

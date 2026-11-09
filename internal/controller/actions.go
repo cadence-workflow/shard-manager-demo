@@ -3,6 +3,7 @@ package controller
 import (
 	"errors"
 	"fmt"
+	"log"
 	"maps"
 	"slices"
 	"sync"
@@ -12,12 +13,19 @@ import (
 	"github.com/dkrotx/shard-manager-demo/internal/workload"
 )
 
-var errBusy = errors.New("the playground is resetting, try again in a few seconds")
+var (
+	errBusy      = errors.New("the playground is resetting, try again in a few seconds")
+	errSwitching = errors.New("Shard Manager is switching, try again in a moment")
+)
 
-// touchLocked records visitor activity and rejects actions during a reset.
+// touchLocked records visitor activity and rejects actions during a reset or
+// while Shard Manager is switching.
 func (c *Controller) touchLocked() error {
 	if c.busy != "" {
 		return errBusy
+	}
+	if c.turningOff || c.restarting {
+		return errSwitching
 	}
 	c.dirty = true
 	c.lastActivity = time.Now()
@@ -88,25 +96,58 @@ func (c *Controller) add() error {
 	return c.spawnWorker()
 }
 
-func (c *Controller) setBalancing(on bool) error {
+// setManager switches between the two ways the playground runs the real
+// shard-manager-server. On, it balances by load. Off, load balancing is
+// disabled, so it only places shards by count: a new worker gets an equal
+// share and a dead worker's shards are spread evenly, whatever their load.
+// The UI shows "off" as Shard Manager not being there at all.
+//
+// Turning off also wipes the namespace, so Shard Manager forgets the balance
+// it reached and places all shards by count again.
+func (c *Controller) setManager(on bool) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if err := c.touchLocked(); err != nil {
 		return err
 	}
-	if on == c.balancing {
+	if on == c.managerOn {
 		return nil
 	}
-	if err := writeDynamicConfig(c.dynamicConfigPath(), on); err != nil {
-		return err
-	}
-	c.balancing, c.balancingChangedAt = on, time.Now()
-	state := "OFF"
+	c.restarting = true
 	if on {
-		state = "ON"
+		c.managerOn, c.managerChangedAt = true, time.Now()
+		c.addEventLocked("action", "Turning Shard Manager on: it restarts with load balancing enabled")
+	} else {
+		c.turningOff, c.managerChangedAt = true, time.Time{}
+		c.addEventLocked("action", "Turning Shard Manager off: it restarts with load balancing disabled and forgets its placement")
 	}
-	c.addEventLocked("action", "Load balancing turned "+state+" (dynamic config moveBudgetProportion)")
+	go c.switchManager(on)
 	return nil
+}
+
+// switchManager restarts shard-manager-server with the new config. Turning
+// off then wipes the namespace; as the workers re-register, Shard Manager
+// places the shards by count, and the end of that placement completes it.
+func (c *Controller) switchManager(on bool) {
+	err := c.restartServer(on)
+	if err == nil && !on {
+		err = c.resetNamespace()
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.restarting = false
+	switch {
+	case err != nil:
+		log.Printf("switch Shard Manager: %v", err)
+		c.managerOn, c.turningOff = !on, false
+		c.addEventLocked("system", "Switching Shard Manager failed: "+err.Error())
+	case on:
+		c.managerChangedAt = time.Now()
+		c.addEventLocked("action", fmt.Sprintf("Shard Manager turned ON: it balances by load (pid %d)", c.server.pid()))
+	default:
+		c.placing, c.placingUntil, c.lastPlacingMove = true, time.Now().Add(10*time.Second), time.Time{}
+	}
 }
 
 func (c *Controller) aliveWorkersLocked() int {
@@ -119,29 +160,31 @@ func (c *Controller) aliveWorkersLocked() int {
 	return n
 }
 
-// reset restores the baseline: fresh workers 1..N, default demand, balancing
-// OFF. It waits for Shard Manager to forget the old executors and for the
-// balancing config to be applied, so the new workers start from a clean slate.
+// reset starts restoring the baseline in the background: fresh workers 1..N
+// placed by count, default demand, Shard Manager off. The initial placement
+// ends the reset.
 func (c *Controller) reset(reason string) error {
 	c.mu.Lock()
+	defer c.mu.Unlock()
 	if c.busy != "" {
-		c.mu.Unlock()
 		return errBusy
+	}
+	if c.turningOff || c.restarting {
+		return errSwitching
 	}
 	c.busy = "Resetting the playground…"
 	c.demand = workload.Baseline()
-	if c.balancing {
-		if err := writeDynamicConfig(c.dynamicConfigPath(), false); err != nil {
-			c.busy = ""
-			c.mu.Unlock()
-			return err
-		}
-		c.balancing, c.balancingChangedAt = false, time.Now()
-	}
+	c.managerOn, c.managerChangedAt = false, time.Time{}
 	workers := slices.Collect(maps.Values(c.workers))
-	configAppliedAt := c.balancingChangedAt.Add(dynamicConfigApplyDelay * time.Millisecond)
-	c.mu.Unlock()
+	go func() {
+		if err := c.finishReset(reason, workers); err != nil {
+			log.Print(err)
+		}
+	}()
+	return nil
+}
 
+func (c *Controller) finishReset(reason string, workers []*workerState) error {
 	var wg sync.WaitGroup
 	for _, w := range workers {
 		wg.Add(1)
@@ -149,17 +192,16 @@ func (c *Controller) reset(reason string) error {
 	}
 	wg.Wait()
 
-	deadline := time.Now().Add(15 * time.Second)
-	for time.Now().Before(deadline) {
-		c.mu.Lock()
-		empty := c.state != nil && len(c.state.Executors) == 0 && len(c.workers) == 0
-		c.mu.Unlock()
-		if empty {
-			break
-		}
-		time.Sleep(200 * time.Millisecond)
+	err := c.restartServer(false)
+	if err == nil {
+		err = c.resetNamespace()
 	}
-	time.Sleep(time.Until(configAppliedAt))
+	if err != nil {
+		c.mu.Lock()
+		c.busy = ""
+		c.mu.Unlock()
+		return fmt.Errorf("reset: %w", err)
+	}
 
 	c.mu.Lock()
 	c.workers = map[int]*workerState{}
@@ -173,7 +215,6 @@ func (c *Controller) reset(reason string) error {
 	c.spawnBaseline()
 
 	c.mu.Lock()
-	c.busy = ""
 	c.dirty = false
 	c.lastActivity = time.Now()
 	c.mu.Unlock()

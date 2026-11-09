@@ -26,7 +26,7 @@ func Module(index int, controllerURL string) fx.Option {
 			fx.Annotate(clock.NewRealTimeSource(), fx.As(new(clock.TimeSource))),
 			clientcommon.Config{Namespaces: []clientcommon.NamespaceConfig{{
 				Namespace:         smclient.Namespace,
-				HeartBeatInterval: 500 * time.Millisecond,
+				HeartBeatInterval: 2 * time.Second,
 			}}},
 			executorclient.ExecutorMetadata{
 				"worker": strconv.Itoa(index),
@@ -35,13 +35,14 @@ func Module(index int, controllerURL string) fx.Option {
 		),
 		fx.Provide(
 			func() (*zap.Logger, error) { return zap.NewProduction(zap.IncreaseLevel(zap.WarnLevel)) },
-			func(lc fx.Lifecycle) *Demand {
-				d := newDemand(controllerURL)
+			NewActive,
+			func(lc fx.Lifecycle, active *Active) *Demand {
+				d := newDemand(controllerURL, index, active)
 				lc.Append(fx.StartStopHook(d.Start, d.Stop))
 				return d
 			},
-			func(d *Demand) executorclient.ShardProcessorFactory[*Processor] {
-				return &Factory{Demand: d.Get}
+			func(d *Demand, active *Active) executorclient.ShardProcessorFactory[*Processor] {
+				return &Factory{Demand: d.Get, Active: active}
 			},
 		),
 	)

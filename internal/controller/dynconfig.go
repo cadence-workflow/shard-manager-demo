@@ -3,11 +3,15 @@ package controller
 import (
 	"fmt"
 	"os"
+	"time"
 )
 
 // Greedy knobs for the playground namespace. These are the real balancer's
 // dynamic config keys, tuned so reactions are visible within seconds instead
 // of the production defaults (1m smoothing, 1m cooldown, 1% move budget).
+// The hysteresis bands are narrower than the defaults (1.15 / 0.90): greedy
+// only moves single shards, and with a few heavy shards on 3 workers the
+// default bands often stop it while one worker is still visibly busier.
 const dynamicConfigTemplate = `# Written by demo-controller. Picked up by shard-manager-server within ~5s.
 shardDistributor.loadBalancingMode:
   - value: greedy
@@ -22,13 +26,20 @@ shardDistributor.loadBalancingGreedy.loadSmoothingTimeConstant:
 shardDistributor.loadBalancingGreedy.perShardCooldown:
   - value: 5s
     constraints: {namespace: playground}
+shardDistributor.loadBalancingGreedy.hysteresisUpperBand:
+  - value: 1.05
+    constraints: {namespace: playground}
+shardDistributor.loadBalancingGreedy.hysteresisLowerBand:
+  - value: 0.95
+    constraints: {namespace: playground}
 `
 
-// moveBudgetOn allows ceil(16*0.2)=4 moves per rebalance pass.
+// moveBudgetOn allows ceil(32*0.2)=7 moves per rebalance pass.
 const moveBudgetOn = 0.2
 
-// dynamicConfigApplyDelay covers the server's 5s minimum poll interval plus one rebalance period.
-const dynamicConfigApplyDelay = 6500 // ms
+// resumeDelay is how long a restarted Shard Manager typically takes to run its
+// first load-based rebalance pass.
+const resumeDelay = 3 * time.Second
 
 func writeDynamicConfig(path string, balancing bool) error {
 	budget := 0.0

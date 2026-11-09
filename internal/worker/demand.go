@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"log"
@@ -8,6 +9,8 @@ import (
 	"os"
 	"sync"
 	"time"
+
+	"github.com/dkrotx/shard-manager-demo/internal/workload"
 )
 
 const (
@@ -15,19 +18,22 @@ const (
 	controllerLostAfter = 3 * time.Second
 )
 
-// Demand mirrors the controller's per-shard target RPS. The worker exits when
-// the controller disappears so no orphan keeps burning CPU.
+// Demand mirrors the controller's per-shard target RPS, and reports back the
+// load of the shards this process runs. The worker exits when the controller
+// disappears so no orphan keeps burning CPU.
 type Demand struct {
-	url  string
-	stop chan struct{}
+	url    string
+	index  int
+	active *Active
+	stop   chan struct{}
 
 	mu   sync.RWMutex
 	rps  map[string]float64
 	seen time.Time
 }
 
-func newDemand(controllerURL string) *Demand {
-	return &Demand{url: controllerURL + "/api/demand", stop: make(chan struct{})}
+func newDemand(controllerURL string, index int, active *Active) *Demand {
+	return &Demand{url: controllerURL + "/api/demand", index: index, active: active, stop: make(chan struct{})}
 }
 
 func (d *Demand) Get(shardID string) float64 {
@@ -47,8 +53,12 @@ func (d *Demand) Start(context.Context) error {
 func (d *Demand) Stop() { close(d.stop) }
 
 func (d *Demand) refresh() error {
+	body, err := json.Marshal(workload.Report{Worker: d.index, PID: os.Getpid(), Loads: d.active.Loads()})
+	if err != nil {
+		return err
+	}
 	client := http.Client{Timeout: time.Second}
-	resp, err := client.Get(d.url)
+	resp, err := client.Post(d.url, "application/json", bytes.NewReader(body))
 	if err != nil {
 		return err
 	}

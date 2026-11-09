@@ -30,7 +30,7 @@ shardDistribution:
   namespaces:
     - name: playground
       type: fixed
-      shardNum: 16
+      shardNum: 32
   leaderStore:
     storageParams:
       endpoints:
@@ -45,4 +45,6 @@ shardDistribution:
       prefix: "store"
   process:
     period: 1s
-    heartbeatTTL: 2s
+    # Two missed heartbeats (they come every 2s) before a worker counts as dead,
+    # slow enough for visitors to follow.
+    heartbeatTTL: 4s

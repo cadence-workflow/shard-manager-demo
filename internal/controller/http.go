@@ -9,14 +9,22 @@ import (
 	"net/http"
 	"strconv"
 	"sync"
+	"time"
 
+	"github.com/dkrotx/shard-manager-demo/internal/workload"
 	"github.com/dkrotx/shard-manager-demo/web"
 )
 
 func (c *Controller) startHTTP() error {
 	mux := http.NewServeMux()
-	mux.Handle("GET /", http.FileServerFS(web.FS))
+	static := http.FileServerFS(web.FS)
+	// Embedded files carry no modification time, so browsers would otherwise keep a stale UI across rebuilds.
+	mux.Handle("GET /", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		static.ServeHTTP(w, r)
+	}))
 	mux.HandleFunc("GET /api/demand", c.handleDemand)
+	mux.HandleFunc("POST /api/demand", c.handleDemand)
 	mux.HandleFunc("GET /api/stream", c.handleStream)
 	mux.HandleFunc("POST /api/heat", c.action(func(r *http.Request) error { return c.heat(r.FormValue("shard")) }))
 	mux.HandleFunc("POST /api/kill", c.action(func(r *http.Request) error {
@@ -24,17 +32,10 @@ func (c *Controller) startHTTP() error {
 		return c.kill(index)
 	}))
 	mux.HandleFunc("POST /api/add", c.action(func(*http.Request) error { return c.add() }))
-	mux.HandleFunc("POST /api/balancing", c.action(func(r *http.Request) error {
-		return c.setBalancing(r.FormValue("on") == "true")
+	mux.HandleFunc("POST /api/manager", c.action(func(r *http.Request) error {
+		return c.setManager(r.FormValue("on") == "true")
 	}))
-	mux.HandleFunc("POST /api/reset", c.action(func(*http.Request) error {
-		go func() {
-			if err := c.reset("requested by a visitor"); err != nil && !errors.Is(err, errBusy) {
-				log.Print(err)
-			}
-		}()
-		return nil
-	}))
+	mux.HandleFunc("POST /api/reset", c.action(func(*http.Request) error { return c.reset("requested by a visitor") }))
 
 	listener, err := net.Listen("tcp", c.cfg.Listen)
 	if err != nil {
@@ -60,8 +61,16 @@ func (c *Controller) action(fn func(*http.Request) error) http.HandlerFunc {
 }
 
 // handleDemand is polled by workers: it is the workload generator's output.
-func (c *Controller) handleDemand(w http.ResponseWriter, _ *http.Request) {
+// Workers post the load of the shards they run with every poll.
+func (c *Controller) handleDemand(w http.ResponseWriter, r *http.Request) {
+	var report workload.Report
+	if r.Method == http.MethodPost {
+		_ = json.NewDecoder(r.Body).Decode(&report)
+	}
 	c.mu.Lock()
+	if wk := c.workers[report.Worker]; wk != nil && wk.proc.pid() == report.PID {
+		wk.loads, wk.loadsAt = report.Loads, time.Now()
+	}
 	data, _ := json.Marshal(c.demand)
 	c.mu.Unlock()
 	w.Header().Set("Content-Type", "application/json")
