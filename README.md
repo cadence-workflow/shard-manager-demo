@@ -18,9 +18,10 @@ does far more than another:
 
 ![Shard Manager ON](docs/2-balancing-on.png)
 
-**Kill a worker.** Shard Manager notices the missing heartbeat and moves its shards to the survivors:
+**Kill a worker.** Its heartbeats stop and its wire counts down the 4s heartbeat TTL. Then Shard Manager
+moves its shards to the survivors:
 
-![Recovery after killing a worker](docs/3-recovery.png)
+![Killed worker counting down its heartbeat TTL](docs/3-killed.png)
 
 **Press `?`** for a short guide to the screen:
 
