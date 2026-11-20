@@ -3,7 +3,7 @@ module github.com/dkrotx/shard-manager-demo
 go 1.26.0
 
 require (
-	github.com/cadence-workflow/shard-manager v0.0.0-20261106140927-c90d7e5d16de
+	github.com/cadence-workflow/shard-manager v0.0.0-20261116131608-8899a6f472e8
 	github.com/uber-go/tally v3.3.15+incompatible
 	go.uber.org/fx v1.23.0
 	go.uber.org/yarpc v1.70.3
